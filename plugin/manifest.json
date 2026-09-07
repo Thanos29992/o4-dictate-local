@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "shlok.asr",
+  "name": "ASR",
+  "version": "1.0.0",
+  "author": "Omarchy + custom NPU dictation",
+  "description": "NPU speech-to-text: device/model selection and on/off",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "ASR",
+    "description": "Speech-to-text on NPU/CPU/GPU: enable/disable, choose inference device and model, model offload policy.",
+    "category": "Input",
+    "allowMultiple": false
+  }
+}
