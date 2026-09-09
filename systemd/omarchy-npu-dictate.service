@@ -1,0 +1,28 @@
+[Unit]
+Description=Omarchy NPU Dictation daemon (shlok.asr)
+# Backend is auto-dispatched by the daemon based on the selected model:
+#   parakeet-v3 (GGUF)            -> ggml / libtranscribe / Vulkan
+#   whisper-tiny / base.en / small.en  -> openvino_genai.WhisperPipeline
+# The panel writes state/device.txt and state/model.txt; the daemon reads
+# them on each Copilot toggle so the UI is the primary control surface.
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dictate --max-secs 300 --daemon
+# lightweight listener only — models load/unload on each Copilot toggle (Handy-style)
+Restart=on-failure
+RestartSec=3
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The daemon spawns wl-copy/wtype to move the transcript onto the clipboard and
+# paste it. As a user service it does NOT inherit WAYLAND_DISPLAY (hardcoded
+# Environment= overrides the session), so without this line wl-copy can't reach
+# the compositor and nothing lands on the clipboard / nothing pastes.
+Environment=WAYLAND_DISPLAY=wayland-1
+# The ggml/libtranscribe backend (CPU + Vulkan GPU for parakeet-v3) lives in
+# ~/.local/share/npu-asr/ggml/. The re-VAMP binary links against libtranscribe
+# and libggml-*.so at runtime, so the dynamic linker needs to find them.
+Environment=LD_LIBRARY_PATH=%h/.local/share/npu-asr/ggml
+
+[Install]
+WantedBy=default.target
