@@ -7,3 +7,5 @@
 - basic build/install scripts working
 - added reference scripts for asr/fbank/nemo, mostly for testing
 - daemon now auto starts via systemd
+- pulled in nepali and parakeet models
+- still need to test vad + whisper fallback
