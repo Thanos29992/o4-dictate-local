@@ -9,3 +9,5 @@
 - daemon now auto starts via systemd
 - pulled in nepali and parakeet models
 - still need to test vad + whisper fallback
+- conversion tooling done for nepali models
+- docs cleaned up, license added
