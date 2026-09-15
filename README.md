@@ -1,132 +1,85 @@
-# npu-asr — Native NPU Dictation for Omarchy (Intel NPU + Parakeet TDT) <img src="https://github.com/devicons/go-fill.svg" height="16" style="display:inline"/>
+# o4-dictate-local
 
-Native C/C++ ASR dictation that runs the **Parakeet TDT 0.6B** (INT8) model on
-your **Intel Core Ultra NPU** ("Intel(R) AI Boost") via OpenVINO — no Python at
-runtime, no Whisper. The physical **Copilot button** on your Acer Aspire
-A14-52MT is rebound from "Omarchy menu" to **tap-to-dictate** (toggle).
+Local speech-to-text for my Omarchy desktop. I tap the Copilot key to start
+recording, tap it again to stop, and the transcript gets typed straight into
+whatever I'm focused on. No cloud, no account, the audio never leaves the
+machine.
 
-## What works (verified)
+The daemon is a small C++ process that stays resident, loads a model only when
+I push the button, transcribes, then pastes the result (clipboard plus
+synthetic keypresses, so it lands in any app). The panel is an Omarchy bar
+widget that picks device, model and offload policy.
 
-| Piece | Status |
-|---|---|
-| NPU reachable (`intel_vpu`, `/dev/accel0`) | ✅ verified (device enumerates as "NPU") |
-| Parakeet encoder (652 MB INT8) compiles **on the NPU** | ✅ verified — 119 s first compile, cached after |
-| Encoder I/O: `audio_signal [1,128,T]`, `length [1]` → `outputs [1,1024,T_enc]` | ✅ verified |
-| LogMel frontend (Nemo LogMel 128, Slaney, native fftw) | ✅ implemented in `src/feats.h`, matches onnx-asr reference |
-| TDT greedy decode (decoder_joint) | ✅ verified — CPU run produced a correct transcript |
-| Copilot key → own action | ✅ rebound in `~/.config/hypr/bindings.lua` |
-| Warm daemon (keeps models resident, no per-tap recompile) | ✅ `dictate --daemon`, SIGUSR1 toggle |
-| Output: type into focused window + copy to clipboard | ✅ via `wtype` + `wl-copy` |
+## Models
 
-### Sample run (CPU correctness check)
-```
-$ dictation --device CPU --max-secs 30 /tmp/sample16k.wav
-He hoped there would be stew for dinner, turnips and carrots and bruised potatoes,
-and fat mutton pieces to be ladled out in thick, peppered, flour fattened sauce.
-```
-(The above is the canonical LibriSpeech "1.flac" sample — the model transcribes
-it accurately. NPU run is the same algorithm; ~10–60 s of per-frame decoder
-inference depending on utterance length.)
+Three models behind the toggle, each pinned to the hardware it runs best on:
 
-## Files
+| model | language | device |
+|---|---|---|
+| Whisper Base, INT4 OpenVINO IR | English | NPU |
+| Parakeet V3 Streaming, Q8_0 GGUF | English | iGPU |
+| Nepali ASR (indicwav2vec), OpenVINO IR | Nepali | CPU + iGPU |
 
-```
-~/.local/share/npu-asr/
-  dictate                       # built native binary
-  install.sh                    # one-command build + wire
-  cache/                        # OpenVINO compiled-blob cache (~2 min compile, once)
-  state/                        # daemon status.json + capture.wav + daemon.pid
-  models/parakeet-tdt-0.6b-v3-onnx/   # encoder (652MB) + decoder (18MB) + vocab
-  src/
-    feats.h              # Nemo LogMel frontend (native, fftw3f)
-    dictate.cpp          # ASR + daemon + toggle + typing/clipboard plumbing
-    npu_probe.c / model_probe.cpp / npu_frames_probe.cpp  # diagnostics already used
-    dump_io.cpp          # ONNX I/O dump utility
-  ~/.local/bin/omarchy-npu-dictate   # toggle wrapper (calls the daemon)
-  ~/.local/bin/voxtype              # bar shim (feeds status.json to Omarchy bar)
-  ~/.config/systemd/user/omarchy-npu-dictate.service  # auto-starts daemon on login
-  ~/.config/hypr/bindings.lua      # Copilot key → Dictate toggle (your override)
-```
+Silero VAD v4 sits in front for silence detection. Weights are fetched by a
+script rather than committed.
 
-## How to set up (run once)
+- Whisper Base int4 is the only model that touches the NPU ("Intel AI
+  Boost"). English-only, and the fastest path on the NPU.
+- Parakeet V3 Streaming runs on the iGPU through ggml + libtranscribe
+  (Vulkan backend). This is the streaming-capable one.
+- Nepali ASR is a fine-tune of indicwav2vec exported to OpenVINO IR. Real
+  Devanagari output, runs on CPU or iGPU.
 
-Dependencies the daemon needs (your pacman list — **you** run these, since
-`sudo` in this env is TTY-gated):
-```bash
-sudo pacman -S --needed openvino ffmpeg sndfile pipewire wl-clipboard wtype
-```
-Then:
-```bash
-bash ~/.local/share/npu-asr/install.sh
-```
-That builds the binary, drops the scripts, and enables the systemd user service.
-Then **reload Hyprland**: `SUPER+SHIFT+R` (or `hyprctl reload`).
+Hardware I run this on: an Acer with a Core Ultra 5 226V, the Arc 130V iGPU
+and the NPU, on Arch with Omarchy. OpenVINO enumerates CPU and NPU; the iGPU
+gets used through ggml's Vulkan backend.
 
-Warm the NPU the first time (one-off ~2 min compile, then cached):
-```bash
-omarchy-npu-dictate start-daemon
-```
+## What works
 
-## Daily use
+- tap-to-dictate through the Copilot key (record, transcribe, paste)
+- whisper base int4 on the NPU — fast, noise-free english dictation
+- parakeet v3 streaming on the iGPU, one-shot and live streaming
+- nepali asr on CPU / iGPU with real devanagari in the transcript
+- silero vad so long recordings don't feed dead air to the model
+- offload policy: drop the weights after a take, or keep them resident
+- floating recorder overlay with a timer and vu bars while recording
 
-The **Copilot button** is now your dictation toggle:
-1. Tap it once → records from your mic (bar shows "recording").
-2. Tap again → stops, transcribes on the **NPU**, types into the focused window
-   and copies the text to the clipboard (bar shows "transcribing" → "idle").
+## Repo layout
 
-Equivalent commands:
-```bash
-omarchy-npu-dictate toggle        # send SIGUSR1 to the running daemon
-omarchy-npu-dictate start-daemon  # start the warm daemon (login auto-starts it)
-omarchy-npu-dictate status        # current bar JSON
-dictate --transcribe foo.wav      # one-shot: print transcript only
-dictate --type foo.wav            # one-shot: type + clipboard
-dictate --device CPU foo.wav      # force CPU (fallback) instead of NPU
-```
+- daemon/ — dictate.cpp, feats.h (log-mel frontend), build.sh, install.sh,
+  the ref_* probes, parakeet_stream_transcribe_rt.cpp
+- plugin/ — the Quickshell/Omarchy panel, the recorder popup, assets
+- helpers/ — python transcribers: whisper, qwen3, indicwav2vec
+- models/ — metadata per model; the weights are gitignored
+- systemd/ — omarchy-npu-dictate.service
+- tools/ — fetch-vad.sh, nepali-convert/
 
-## Architecture notes (the hard parts, already decided)
+## Setup
 
-### Why features `[1,128,T]`, not raw audio
-The Parakeet ONNX encoder's `audio_signal` input is **mel-spectrogram features**
-`[batch, 128, time_frames]`, with `length = real_samples // 160` (10 ms frames,
-hop 160 @ 16 kHz). An early note incorrectly claimed `[1,T,1]` (raw audio); the
-fresh ONNX dump (`[?,128,?]`) and the reference code (`NemoConformer._encoder_shapes`)
-both confirm the feature layout. The `nemo128.onnx` preprocessor in the model
-dir **cannot** run through OpenVINO (STFT-17/`ReduceSumSquare` are unconvertible),
-so the frontend is reimplemented natively in `feats.h`.
+Dependencies on Arch: openvino, fftw, sndfile (or ffmpeg), pipewire,
+wl-clipboard, wtype. Then run daemon/install.sh — it builds the daemon, drops
+the systemd user unit and enables it. Reload Hyprland so the Copilot key
+binding takes effect. The first NPU compile takes a couple of minutes, then
+it's cached.
 
-### Static shapes are required on the NPU
-NPU compilation rejects the dynamic ONNX. So the engine reshapes
-`audio_signal` → `[1, 128, T_MAX]` (T_MAX = frame count of the fixed recording
-window) and zero-pads/truncates each utterance to exactly that many frames.
-The encoder's `length` input carries the *real* frame count so the conformer
-attention mask drops the zero-padded tail (matching the reference `normalize`
-mask). Default window: **30 s** (`--max-secs`).
+## Day to day
 
-### Decode (TDT)
-`decoder_joint` is a transducer: each encoder frame → a logits vector of
-`[vocab=8193, duration=5]`. Greedy TDT loop (verbatim from onnx-asr
-`_AsrWithTransducerDecoding`): emit the argmax token if non-blank (blank =
-8192); advance `t += duration_step` or `t += 1`; reset the per-step counter on
-emit / at `max_tokens_per_step=10`.
+Tap Copilot to start recording, tap again to transcribe and paste. The bar
+shows recording / transcribing / idle, and the floating popup mirrors it live.
 
-### Bar indicator integration
-`omarchy-voxtype-status` only emits useful state when `voxtype` exists on PATH.
-The `voxtype` shim in `~/.local/bin/voxtype` reads `state/status.json` and emits
-the same JSON contract, so the Omarchy Dictation bar icon reflects
-recording/transcribing/idle — no QML changes, no system-file edits.
+Two gotchas I hit:
 
-### Qwen3-ASR-0.6B (secondary, planned)
-Parakeet is primary. Qwen3-ASR is a one-line `--model` switch away, but it's not
-integrated in this pass per the user's deferral note; add it as a second model
-directory and swap `MODEL_DIR` / adapt the decoder shapes.
+- whisper and nepali shell out to the python helpers; parakeet is pure C++
+  through ggml. All helper output goes through json with ensure_ascii=False,
+  so devanagari (and german, and anything non-ascii) round-trips correctly
+  into the clipboard instead of coming out as escaped \u sequences.
+- the systemd user service doesn't inherit the wayland display, so it sets
+  WAYLAND_DISPLAY explicitly. Without it wl-copy can't reach the compositor
+  and nothing gets pasted.
 
 ## Troubleshooting
-- **Bar stays "idle"** after a tap: the daemon may not be running. Run
-  `omarchy-npu-dictate start-daemon` and check `journalctl --user -u
-  omarchy-npu-dictate`.
-- **Copilot key does nothing**: run `hyprctl reload` after editing
-  `bindings.lua`; verify with `omarchy menu keybindings --print`.
-- **NPU compile fails / wrong layout**: the build notes in
-  `BUILD_NOTES.md` capture the exact I/O contract. Re-run `dump_io` on your
-  model file if you get a different ONNX variant.
+
+- nothing pastes after a take: check WAYLAND_DISPLAY is set for the service
+- bar stays idle: the daemon may not be running, journalctl --user -u
+  omarchy-npu-dictate
+- transcript full of \uXXXX escapes: an older helper without ensure_ascii=False
