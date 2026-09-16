@@ -9,7 +9,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/dictate --max-secs 300 --daemon
+ExecStart=%h/.local/bin/dictate --max-secs 600 --daemon
 # lightweight listener only — models load/unload on each Copilot toggle (Handy-style)
 Restart=on-failure
 RestartSec=3
