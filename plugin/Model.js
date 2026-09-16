@@ -41,7 +41,9 @@ function parseModelList(raw) {
 var MODEL_DISPLAY_NAMES = {
   "parakeet-v3": "Parakeet V3 Streaming",
   "nepali-indicwav2vec": "Nepali ASR",
-  "whisper-base-en": "Whisper Base"
+  "whisper-base-en": "Whisper Base EN",
+  "whisper-base-int4-ov": "Whisper Base Multilingual",
+  "whisper-medium-int4-ov": "Whisper Medium Multilingual"
 }
 
 function modelLabel(name) {
@@ -72,9 +74,8 @@ var DEVICE_GLYPHS = {
 // Add a model here when the name is FINAL but the live-mic path is still
 // on the to-do list. Remove the entry when the live-mic integration
 // ships — the panel will then render the model name without the marker.
-var NOT_LIVE_GLYPH = "󰀦"   // nf-md-progress-clock (work-in-progress)
+var NOT_LIVE_GLYPH = ""   // nf-md-progress-clock (work-in-progress)
 var NOT_LIVE_YET = {
-  // "parakeet-v3": true,            // ← uncomment when live-mic ships
   "nepali-indicwav2vec": true        // one-shot works; live-mic streaming TODO
 }
 
@@ -125,7 +126,8 @@ function devicesForModel(name, devicesJson, modelsDir) {
   var s = String(name)
   if (s === "parakeet-v3") return ["GPU"]
   if (s === "nepali-indicwav2vec") return ["CPU", "GPU"]
-  if (s.indexOf("whisper-") === 0) return ["NPU"]
+  if (s === "whisper-base-en") return ["CPU", "GPU", "NPU"]
+  if (s.indexOf("whisper-") === 0) return ["CPU", "GPU", "NPU"]
   if (s.indexOf("parakeet-") === 0) return ["CPU", "GPU"]
   if (s.indexOf("-gguf") !== -1)   return ["CPU", "GPU"]
   if (s.indexOf("-onnx") !== -1)   return ["CPU", "GPU", "NPU"]
