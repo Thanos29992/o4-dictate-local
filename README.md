@@ -30,9 +30,8 @@ script rather than committed.
 - Nepali ASR is a fine-tune of indicwav2vec exported to OpenVINO IR. Real
   Devanagari output, runs on CPU or iGPU.
 
-Hardware I run this on:
+Hardware I run this on: an Acer Aspire 14 AI.
 
-- Core Ultra 5
 - Intel Core Ultra 5 226V
 - Intel ARC 130V iGPU
 - Intel AI Boost NPU, 40 TOPS
