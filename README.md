@@ -16,29 +16,35 @@ Three models behind the toggle, each pinned to the hardware it runs best on:
 
 | model | language | device |
 |---|---|---|
-| Whisper Base, INT4 OpenVINO IR | English | NPU |
-| Parakeet V3 Streaming, Q8_0 GGUF | English | iGPU |
+| Whisper Base, INT4 OpenVINO IR | English | CPU, iGPU, NPU |
+| Parakeet V3 Streaming, Q8_0 GGUF | English | GPU |
 | Nepali ASR (indicwav2vec), OpenVINO IR | Nepali | CPU + iGPU |
 
 Silero VAD v4 sits in front for silence detection. Weights are fetched by a
 script rather than committed.
 
-- Whisper Base int4 is the only model that touches the NPU ("Intel AI
-  Boost"). English-only, and the fastest path on the NPU.
-- Parakeet V3 Streaming runs on the iGPU through ggml + libtranscribe
-  (Vulkan backend). This is the streaming-capable one.
+- Whisper Base int4 runs on CPU, iGPU or NPU. English-only; the NPU path is
+  the fastest, and it's the only model that pins to it.
+- Parakeet V3 Streaming runs on the GPU through ggml (Vulkan backend). This
+  is the streaming-capable one.
 - Nepali ASR is a fine-tune of indicwav2vec exported to OpenVINO IR. Real
   Devanagari output, runs on CPU or iGPU.
 
-Hardware I run this on: an Acer with a Core Ultra 5 226V, the Arc 130V iGPU
-and the NPU, on Arch with Omarchy. OpenVINO enumerates CPU and NPU; the iGPU
-gets used through ggml's Vulkan backend.
+Hardware I run this on:
+
+- Core Ultra 5
+- Intel Core Ultra 5 226V
+- Intel ARC 130V iGPU
+- Intel AI Boost NPU, 40 TOPS
+
+Arch with Omarchy. OpenVINO enumerates CPU and NPU; the iGPU gets used
+through ggml's Vulkan backend.
 
 ## What works
 
 - tap-to-dictate through the Copilot key (record, transcribe, paste)
 - whisper base int4 on the NPU — fast, noise-free english dictation
-- parakeet v3 streaming on the iGPU, one-shot and live streaming
+- parakeet v3 streaming on the GPU, one-shot and live streaming
 - nepali asr on CPU / iGPU with real devanagari in the transcript
 - silero vad so long recordings don't feed dead air to the model
 - offload policy: drop the weights after a take, or keep them resident
