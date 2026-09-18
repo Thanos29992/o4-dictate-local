@@ -3,6 +3,7 @@
 // A right-side bar-widget, styled like the built-in Bluetooth/Power panels.
 // Pressing Copilot starts/stops recording and transcribes on the selected
 // device/model (the daemon reads the state files below fresh on every toggle).
+// device/model (the daemon reads the state files below fresh on every toggle).
 // This panel is purely settings:
 //   - Master on/off       state/enabled      (when off, Copilot does nothing)
 //   - Inference device    state/device.txt   (CPU / GPU / NPU)
@@ -10,10 +11,7 @@
 //   - Offload policy      state/offload      (immediate vs keep-in-RAM seconds)
 //   - Animated status line                   (cycling phrases, like WiFi's)
 //
-// (No LANGUAGE setting — every model is now language-pinned by design:
-// Whisper Base + Parakeet V3 = English, Nepali ASR = Nepali.)
-//
-// State files live under ~/.local/share/npu-asr/state/.
+// State files live under ~/.local/share/npu-asr-test/state/.
 import QtQuick
 import QtQuick.Effects
 import QtQuick.Layouts
@@ -37,9 +35,22 @@ Panel {
   property var modelList: []
   property var devicesJson: ({} )  // {models: {name: [devs...]}} from state/devices.json
   property string activeModel: ""
-  property bool immediateOffload: true
-  property int ramHoldSecs: 30
+  property int offloadIndex: 0
+  property int feedbackVolume: 15
   property string statusClass: "idle"
+  // True when the daemon is in real-time STREAMING mode (parakeet-stream).
+  // The daemon sets "stream":1 for streaming takes: live phase reports class
+  // "recording" + stream (so the popup shows timer+bars), post-tap drain
+  // reports class "transcribing" (+stream until finalized). Either way the
+  // bar shows the single streaming glyph while root.streaming is true.
+  property bool streaming: false
+
+  // ---- cursor navigation state (for slider hover borders) ----
+  property string focusSection: "offload"
+  property int selectedIndex: -1
+  property bool cursorActive: false
+
+  function ensureCursorVisible(item) { /* short panel, no scroll needed */ }
 
   // ---- animated status phrases (mirror WiFi's hero rotation) ----
   property int phraseIndex: 0
@@ -57,11 +68,13 @@ Panel {
   readonly property string heroStatusText:
     phrases[phraseIndex % phrases.length]
 
-  // How long to keep the model in RAM before the daemon unloads it, when
-  // immediate offload is off. Bumped by the +/- buttons.
-  readonly property int ramStep: 10
-  readonly property int ramMin: 10
-  readonly property int ramMax: 600
+  // Model offload slider. Discrete stops, left->right:
+  //   Immediate, 30s, 1m, 2m, 5m, 10m, 15m, Never
+  // "Immediate" writes "1" to state/offload; every other stop writes "0 <secs>"
+  // (keep-in-RAM). A huge secs on the last stop makes the timed unload never
+  // fire in practice, so "Never" keeps the model resident.
+  readonly property var offloadStops: ["Immediate", "30s", "1m", "2m", "5m", "10m", "15m", "Never"]
+  readonly property var offloadSecs:  [30, 30, 60, 120, 300, 600, 900, 31536000]
 
   // ---- product name ----
   // THE name shown next to the bar icon (and in the header). This is the single
@@ -73,9 +86,11 @@ Panel {
   // Primary bar/hero icon (idle, enabled) — user-picked.
   readonly property string idleGlyph: ""      // U+F198  (primary)
   // Shown in the bar while WE are recording to transcribe (not global recording).
-  readonly property string recordingGlyph: "" // U+F2A2
-  // Shown while the model is transcribing (model use).
-  readonly property string transcribingGlyph: "" // U+EC21
+  readonly property string recordingGlyph: "󰟅" // U+F07C5 (md-ear_hearing)
+  // Streaming: record + transcribe run together — ONE glyph.
+  readonly property string streamGlyph: ""    // U+F2A2 (fa-ear_listen)
+  // Shown while a NON-streaming model is transcribing (model use).
+  readonly property string transcribingGlyph: "" // U+EC21 (cod-sparkle_filled)
   // Disabled state (distinct so on/off is legible at a glance).
   // Device glyphs (CPU / GPU / NPU), user-picked.
   readonly property string cpuGlyph: ""       // U+F4BC  CPU
@@ -87,10 +102,13 @@ Panel {
   // The menu-bar + hero glyph, driven by current state.
   // When disabled we keep the SAME idle glyph, but dim it (barDimmed) so it
   // reads as "off" without swapping to a different icon.
+  // NOTE: live streaming reports class "recording" + stream:1 (so the popup
+  // can show its recording phase with timer+bars), so the stream branch must
+  // be checked on BOTH recording and transcribing classes.
   readonly property string barGlyph:
-    root.statusClass === "recording"    ? root.recordingGlyph :
-    root.statusClass === "transcribing" ? root.transcribingGlyph :
-                                         root.idleGlyph
+    root.statusClass === "recording"    ? (root.streaming ? root.streamGlyph : root.recordingGlyph) :
+    root.statusClass === "transcribing" ? (root.streaming ? root.streamGlyph : root.transcribingGlyph) :
+                                          root.idleGlyph
 
   // True when ASR is disabled — bar + hero show the idle glyph at reduced opacity.
   readonly property bool barDimmed: !root.dictationEnabled
@@ -124,6 +142,7 @@ Panel {
     if (!procModelSel.running) procModelSel.running = true
     if (!procOffload.running) procOffload.running = true
     if (!procDevices.running) procDevices.running = true
+    if (!procVolume.running) procVolume.running = true
   }
 
   Process {
@@ -144,9 +163,10 @@ Panel {
     id: procStatus
     command: ["cat", root.stateDir + "/status.json"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
-      // status.json = {"alt":"…","class":"…","tooltip":""}
+      // status.json = {"alt":"…","class":"…","tooltip":"","stream":1,"since":…}
       var m = /"class"\s*:\s*"([^"]*)"/.exec(String(text))
       root.statusClass = m ? m[1] : "idle"
+      root.streaming = (String(text || "").indexOf('"stream":1') >= 0)
     } }
   }
   Process {
@@ -169,8 +189,7 @@ Panel {
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
       var t = String(text).trim().split(/\s+/)
       if (t.length >= 1 && t[0] !== "none") {
-        root.immediateOffload = t[0] === "1"
-        if (t.length >= 2) root.ramHoldSecs = parseInt(t[1]) || root.ramHoldSecs
+        root.offloadIndex = root.offloadIndexFromPolicy(t[0] === "1", t.length >= 2 ? (parseInt(t[1]) || 30) : 30)
       }
     } }
   }
@@ -184,6 +203,15 @@ Panel {
       } catch (e) {
         root.devicesJson = { models: {} }
       }
+    } }
+  }
+  Process {
+    id: procVolume
+    command: ["bash", "-c", "cat " + root.stateDir + "/volume 2>/dev/null || echo 15"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: {
+      var v = parseInt(String(text || "15").trim())
+      if (isNaN(v) || v < 0 || v > 100) v = 15
+      root.feedbackVolume = v
     } }
   }
 
@@ -205,15 +233,33 @@ Panel {
     activeModel = m
     writeSetting("echo '" + m + "' > " + root.stateDir + "/model.txt")
   }
-  function setOffload(immediate, secs) {
-    immediateOffload = immediate
-    ramHoldSecs = secs
-    writeSetting("echo '" + (immediate ? "1" : "0") + " " + secs + "' > " + root.stateDir + "/offload")
+  // Map a state-file policy ("1" immediate / "0" keep-in-RAM + secs) back to the
+  // nearest slider index. An exact seconds match wins; otherwise we snap to the
+  // closest keep-in-RAM stop.
+  function offloadIndexFromPolicy(immediate, secs) {
+    if (immediate) return 0  // state "1" -> "Immediate", whatever the secs value
+    for (var i = 1; i < root.offloadSecs.length; i++) {
+      if (root.offloadSecs[i] === secs) return i
+    }
+    var nearest = 1, best = Math.abs(root.offloadSecs[1] - secs)
+    for (var j = 2; j < root.offloadSecs.length; j++) {
+      var d = Math.abs(root.offloadSecs[j] - secs)
+      if (d < best) { best = d; nearest = j }
+    }
+    return nearest
   }
-  function nudgeRam(delta) {
-    var next = Math.max(root.ramMin, Math.min(root.ramMax, root.ramHoldSecs + delta))
-    if (next === root.ramHoldSecs) return
-    setOffload(false, next)
+  function setOffloadIndex(idx) {
+    idx = Math.max(0, Math.min(root.offloadStops.length - 1, idx))
+    root.offloadIndex = idx
+    if (idx === 0) {
+      writeSetting("echo '1 30' > " + root.stateDir + "/offload")
+    } else {
+      writeSetting("echo '0 " + root.offloadSecs[idx] + "' > " + root.stateDir + "/offload")
+    }
+  }
+  function setFeedbackVolume(v) {
+    root.feedbackVolume = v
+    writeSetting("echo " + v + " > " + root.stateDir + "/volume")
   }
 
   // ---- LIVE status poll: always on, NOT gated on root.opened ----
@@ -694,72 +740,138 @@ Panel {
         width: parent.width
         spacing: Style.space(10)
 
-        PanelSectionHeader { text: "MODEL OFFLOAD"; foreground: root.bar.foreground; fontFamily: root.bar.fontFamily }
-
+        // Header + value on the SAME row: "MODEL OFFLOAD" left-aligned,
+        // current stop value right-aligned (like monitor's text-size readout).
         Item {
           width: parent.width
-          implicitHeight: Math.max(offloadLabel.implicitHeight, offloadSwitch.implicitHeight)
+          implicitHeight: Style.font.body * 1.4
 
-          Text {
-            id: offloadLabel
-            text: "Offload immediately"
-            color: root.bar.foreground
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.body
+          PanelSectionHeader {
+            text: "MODEL OFFLOAD"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
           }
 
-          ToggleSwitch {
-            id: offloadSwitch
+          Text {
+            id: offloadValue
+            textFormat: Text.PlainText
+            text: root.offloadStops[Math.round(offloadSlider.dragging ? offloadSlider.liveValue : root.offloadIndex)]
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
             anchors.right: parent.right
+            anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
-            checked: root.immediateOffload
-            foreground: root.bar.foreground
-            onToggled: root.setOffload(!root.immediateOffload, root.ramHoldSecs)
           }
         }
 
-        // RAM-hold stepper — shown only when immediate offload is off.
-        Item {
-          visible: !root.immediateOffload
+        // Discrete ramp: Immediate / 30s / 1m / 2m / 5m / 10m / 15m / Never.
+        // Maps to state/offload exactly as the old toggle + stepper did.
+        // CursorSurface + outline + HoverHandler mirrors the display panel's
+        // brightness slider hover border (subtle accent border on mouse-hover).
+        CursorSurface {
+          id: offloadRow
           width: parent.width
-          implicitHeight: ramInfo.implicitHeight
+          height: offloadSlider.implicitHeight + Style.spacing.controlGap
+          hasCursor: root.cursorActive && root.focusSection === "offload" && root.selectedIndex === -1
+          onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(offloadRow)
+          foreground: root.bar.foreground
+          outline: true
 
-          Text {
-            id: ramInfo
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: "Keep in RAM · " + root.ramHoldSecs + " s"
-            color: Qt.darker(root.bar.foreground, 1.4)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.bodySmall
+          PanelSlider {
+            id: offloadSlider
+            bar: root.bar
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            minimum: 0
+            maximum: root.offloadStops.length - 1
+            step: 1
+            integer: true
+            tickCount: root.offloadStops.length
+            value: root.offloadIndex
+            onReleased: function(v) { root.setOffloadIndex(Math.round(v)) }
           }
 
-          RowLayout {
-            spacing: Style.space(6)
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-
-            Button {
-              text: "−"
-              fontSize: Style.font.body
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              horizontalPadding: Style.space(7)
-              verticalPadding: Style.spacing.controlPaddingY
-              bordered: true
-              onClicked: root.nudgeRam(-root.ramStep)
+          HoverHandler {
+            onHoveredChanged: if (hovered) {
+              root.cursorActive = true
+              root.focusSection = "offload"
+              root.selectedIndex = -1
             }
-            Button {
-              text: "+"
-              fontSize: Style.font.body
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              horizontalPadding: Style.space(7)
-              verticalPadding: Style.spacing.controlPaddingY
-              bordered: true
-              onClicked: root.nudgeRam(root.ramStep)
+          }
+        }
+      }
+
+      // ---------- audio feedback ----------
+      PanelSeparator { foreground: root.bar.foreground }
+      Column {
+        width: parent.width
+        spacing: Style.space(10)
+
+        // Header + value on the SAME row: "AUDIO FEEDBACK" left-aligned,
+        // current volume right-aligned (matches monitor's brightness layout).
+        Item {
+          width: parent.width
+          implicitHeight: Math.max(volumeHeader.implicitHeight, volumePercent.implicitHeight)
+
+          PanelSectionHeader {
+            id: volumeHeader
+            text: "AUDIO FEEDBACK"
+            foreground: root.bar.foreground
+            fontFamily: root.bar.fontFamily
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Text {
+            id: volumePercent
+            textFormat: Text.PlainText
+            text: Math.round(volumeSlider.dragging ? volumeSlider.liveValue : root.feedbackVolume) + "%"
+            color: Qt.darker(root.bar.foreground, 1.4)
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+
+        // Continuous slider 0–100, default 15. Mirrors the display panel's
+        // brightness slider look: CursorSurface + outline + HoverHandler
+        // gives the subtle accent border on mouse-hover.
+        CursorSurface {
+          id: volumeRow
+          width: parent.width
+          height: volumeSlider.implicitHeight + Style.spacing.controlGap
+          hasCursor: root.cursorActive && root.focusSection === "volume" && root.selectedIndex === -1
+          onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(volumeRow)
+          foreground: root.bar.foreground
+          outline: true
+
+          PanelSlider {
+            id: volumeSlider
+            bar: root.bar
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            minimum: 0
+            maximum: 100
+            step: 1
+            integer: true
+            value: root.feedbackVolume
+            onReleased: function(v) { root.setFeedbackVolume(Math.round(v)) }
+          }
+
+          HoverHandler {
+            onHoveredChanged: if (hovered) {
+              root.cursorActive = true
+              root.focusSection = "volume"
+              root.selectedIndex = -1
             }
           }
         }
