@@ -1,50 +1,98 @@
-# Nepali Lab — Results (2026-09-05)
+# Production ASR — agent workflow (this file stays)
 
-## TL;DR
-**`sumanpaudel1997/nepali-asr-indicwav2vec` is real, converts to OpenVINO IR, and produces genuine Devanagari on this machine's iGPU.** Smoke-tested on `nep_trim1.wav` (8s Nepali, 16k mono); the transcription **matches the truth text** on the clip. CPU result is identical. NPU compile failed (dynamic-shape ONNX export — not surprising; we'd need to fix shapes for NPU).
+This directory (`/home/shlok/.local/share/npu-asr/`) is the PRODUCTION
+dictation setup. It works. Keep it working.
 
-## Smoked transcript (vs truth)
-- Truth (your "nep_trim1.wav", 8 s): "आज मौसम निकै राम्रो छ त्यसैले बिहानै बाहिर गएर केही समय हिँड्न चाह ..."
-- GPU & CPU output (CTC `|` is the model's word-boundary token):
-  `आज|मौसम|निकै|राम्रो|छ|त्यसैले||बिहानै|बाहिर|गएर|केही|समय|हिँड्न|चाह`
-- Mapping: `आज` = today, `मौसम` = weather, `निकै` = really, `राम्रो` = good, `छ` = is, `त्यसैले` = so, `बिहानै` = morning, `बाहिर` = outside, `गएर` = going, `केही` = some, `समय` = time, `हिँड्न` = walk, `चाह` = want. **12 of the 12 content words match.** ✓
+## Production layout
 
-## Performance
-- **GPU (Intel Arc 130V via Level-Zero):** 2119 ms encoder + 7 ms head+decode = 2.1 s end-to-end
-- **CPU (Ultra 5 226V):** 824 ms encoder + 3 ms head+decode = **0.8 s end-to-end** (CPU faster on this clip)
-- NPU: compile failed (`ZE_RESULT_ERROR_INVALID_ARGUMENT` from `vclAllocatedExecutableCreate2` — dynamic-shape ONNX export doesn't compile on the NPU compiler as-is)
+- Source: `src/` (master branch) — `dictate.cpp`,
+  `parakeet_stream_transcribe_rt.cpp`, `build.sh`
+- Binaries: `/home/shlok/.local/bin/dictate` + `parakeet_stream_transcribe_rt`
+  (shared streaming helper; prod `build.sh` builds both)
+- Service: `omarchy-npu-dictate.service` — `dictate --max-secs 600 --daemon`
+- State: `/home/shlok/.local/share/npu-asr/state/` — `status.json`
+  (`{"class": recording|transcribing|idle, "stream":1?, "since":epoch}`),
+  `level` (mic RMS, ~8x/sec), `model.txt`, `device.txt`, `enabled`, `volume`,
+  rolling `stream1-5.wav/txt` archive of raw streaming takes
+- Sounds: `/home/shlok/.local/share/npu-asr/sounds/` (`start.wav`, `stop.wav`
+  — Handy pop pair; blip on mic-open and at the exact record-stop instant)
+- Plugins: `shlok.asr` (bar widget, product name "ASR") + `shlok.asr-popup`
+  (floating overlay: glyph + timer + bars while recording, Transcribing… +
+  X-cancel while draining)
+- Behavior contract: streaming = unlimited duration, stops on 2nd Copilot tap
+  or 10s continuous silence; non-streaming = 600s cap; paste = one BAM shot
+  via clipboard, byte-identical to model output (no punctuation
+  post-processing, per user request); taps during transcribe are ignored.
+- Idle top-bar glyph = U+F198. Any test copy MUST use a different idle glyph
+  so prod and test are distinguishable at a glance.
 
-## Artifacts
-- `models/indicwav2vec/` — 377 MB safetensors + config + vocab + preprocessor
-- `models/indicwav2vec_enc.onnx` — 377.7 MB ONNX export (encoder only)
-- `models/indicwav2vec_ov/model.xml` + `.bin` — OpenVINO IR (FP16-compressed, ready to run)
-- `smoke/convert_onnx_then_ov.py` — reproducible conversion + smoke test
-- `smoke/nep_trim1.wav`, `smoke/nepali_codex.wav` — test audio
-- `onnx_then_ov.log` — full stdout/stderr
+## Rules for any agent asked to change ASR behavior
 
-## Build + run
-```bash
-# one-time: install onnx into the lab venv (nep-base-lab venv, shared with other Nepali work)
-VENV=/home/shlok/Projects/omarchy-asr/nep-base-lab/.venv
-VIRTUAL_ENV=$VENV uv pip install onnx
+1. DO NOT edit anything under this directory first — unless the user reports
+   production itself is broken AND explicitly asks for a production fix.
+2. Instead, build a TEST copy and work only there:
+   - Fresh git worktree off master, e.g.
+     `git worktree add src/.claude/worktrees/asr-test -b asr-test`.
+   - Clone the plugins to `shlok.asr-test` (bar) + `shlok.asr-test-popup`
+     (overlay): own `stateDir` (`npu-asr-test/state/`), own product name,
+     own idle glyph (NOT U+F198).
+   - Build to `/home/shlok/.local/bin/dictate-asr-test` (+ test sounds dir);
+     test service `omarchy-npu-dictate-test.service` with a short
+     `--max-secs` (30s) so caps are easy to verify.
+   - STOP + DISABLE the prod service first, route Copilot to the test daemon
+     (`bindings.lua`), register the test widgets in `shell.json`. Prod and
+     test must never run together — whichever daemon is alive eats the taps.
+3. Port tested changes here ONLY with explicit user approval
+   ("green light" / "update prod with that"). Keep prod's own idle glyph.
+4. After the port, once the user confirms prod works: restart the prod
+   service, restore `bindings.lua` + `shell.json` to prod-only, then delete
+   the ENTIRE test stack — plugins, binaries, service unit, state dir,
+   worktree + branch. No souvenirs. Append a changelog entry below. THIS
+   file is the only doc that stays.
 
-# convert + smoke
-$VENV/bin/python smoke/convert_onnx_then_ov.py
-```
+Why: if anything breaks mid-experiment, it breaks the disposable copy —
+never the setup the user relies on every day.
 
-## What this means
-- The top pick (`sumanpaudel1997/nepali-asr-indicwav2vec`, 378 MB, 14.89% WER) is **genuinely viable**. It runs on iGPU and CPU today, and produces real Devanagari.
-- To use it in the live ASR daemon, the next step is a small C++ helper (e.g. `indicwav2vec_transcribe.cpp`) that:
-  1. reads a 16k mono wav
-  2. runs the OpenVINO IR on the user's chosen device (CPU/GPU)
-  3. runs the LM-head (one matmul, `[T,768] @ [768,81].T`) — can stay in C++/numpy
-  4. does CTC greedy decode (collapse repeats + remove blank 80) and prints Devanagari
-  5. reuses the existing `whisper_transcribe.py`-style invocation pattern
-- NPU: requires reshaping the ONNX to a static input shape (`[1, T_FIXED]`) for the VCL compiler to accept it. Possible follow-up; not needed for GPU/CPU which work now.
-- For real-time streaming use, this model is a CTC encoder, not a streaming model — would need chunked inference (overlap-add or VAD-segmented single-shot). For "stream while transcribing", the live libtranscribe streaming path is the cleaner choice (English-only on Parakeet Unified; the Nepali equivalent would need a separate streaming-capable model, e.g. the `sumanpaudel` indicwav2vec would need a streaming variant — doesn't exist on the public Hub yet).
+## Known limitations (do not "fix" without being asked)
 
-## Open follow-ups (not done; queue for next session)
-- Build the `indicwav2vec_transcribe` C++ helper for the live daemon.
-- Add a `devices.txt` with `CPU\nGPU\n` to `models/indicwav2vec_ov/` so the daemon's `resolve_model_dir` validates it.
-- Wire it into the panel as a new model entry `nepali-indicwav2vec`.
-- (Optional) NPU: static-shape ONNX export for the VCL compiler.
+- `bindings.lua` points Copilot at `omarchy-npu-dictate toggle`. Any test
+  round that re-points it must restore the prod binding during teardown.
+- Panels only read `enabled` + `status.json`; they cannot detect a dead
+  daemon.
+
+## Changelog
+
+- 2026-09-10 — Glyph swap (FINAL, per user; supersedes the earlier EBC5/F2A2 note):
+  top-bar recording icon = U+F07C5 (md-ear_hearing, 󰟅), non-stream transcribing =
+  U+EC21 (cod-sparkle_filled, ), streaming (record+transcribe together) = U+F2A2
+  (fa-ear_listen, ). Applied to `shlok.asr/Panel.qml` (recordingGlyph / streamGlyph
+  / transcribingGlyph) and the matching waybar `omarchy.npu-mic` format-icons
+  (`~/.config/waybar/config.jsonc`, recording=U+F07C5, transcribing=U+EC21). Panel
+  QML is the source of truth; daemon keeps ASCII status classes only (plus "stream":1
+  while real-time streaming). No prod daemon rebuild required.
+
+- 2026-09-10 — Stage 1 port from asr-test: unlimited streaming, 15s fed-audio
+  silence auto-stop (streaming only), 1s audio tails on all stop paths,
+  NaN/Inf mic sanitize, helper-first fork + tap-instant spool + 1MB pipes,
+  full-drain EOF handshake, whole-file `rt_final.txt`, longest-wins fallback,
+  tee `stream.wav` fallback transcription, BAM clipboard paste, verbatim model
+  output, `g_transcribing` tap-ignore guard. Non-streaming cap stays 300s. No
+  5-take archive in prod. Production LOCKED after this — further experiments
+  stay in asr-test.
+
+- 2026-09-11 — Full promote from asr-test (user-verified working, test stack
+  retired afterwards): streaming live phase reports `recording` + `stream:1`
+  so the popup shows stream glyph + timer + bars; post-tap drain reports
+  `transcribing`; top bar shows the stream glyph (U+F2A2) in both phases via
+  the `stream` flag while non-streaming keeps rec U+F07C5 / transcribe U+EC21.
+  Silence auto-stop 10s (fed-audio seconds), non-streaming cap 600s
+  (`--max-secs 600`). Audio feedback: Handy pop start/stop pair, async
+  double-fork playback, 0–100 volume slider (`state/volume`, default 15) with
+  piecewise gain curve, stop blip at the record-stop instant. Popup promoted
+  as `shlok.asr-popup`: 10 VU bars from `state/level`, X-cancel via
+  `cancel-requested` (daemon polls every 100ms, discards the take, no paste);
+  non-stream path tees sanitized f32 for live level; 5-take stream archive
+  kept in prod state. Prod idle glyph unchanged (U+F198). Entire test stack
+  (plugins, `dictate-asr-test`, service unit, `npu-asr-test/`, worktree +
+  branch) removed after the user's green light — this file is the only doc
+  kept, and future changes go through the test-copy workflow above.
