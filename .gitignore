@@ -1,0 +1,43 @@
+# Build outputs
+dictate
+*.o
+*.bak
+dictate_*.cpp
+
+# Python
+__pycache__/
+*.pyc
+
+# OpenVINO compiled blobs
+cache/
+
+# ggml / whisper.cpp fork shared libraries
+ggml/
+*.so
+*.so.*
+transcribe.h
+
+# Model weights (download separately, see tools/fetch-models.sh)
+models/**/*.bin
+models/**/*.xml
+models/**/*.gguf
+models/**/*.onnx
+models/**/*.safetensors
+models/**/*.npy
+models/vad/*.onnx
+
+# Runtime state (also PII: contains recorded mic audio)
+state/
+state.example/
+
+# OS / editor
+.DS_Store
+*.swp
+*~
+
+# Claude internal
+.claude/worktrees/
+
+# Personal audio recordings & tasks
+tools/nepali-convert/audio/
+tasks/
